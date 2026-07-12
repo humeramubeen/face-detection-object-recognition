@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Live Face, Hand & Object Detection</title>
+<style>
+  body {
+    margin: 0;
+    background: #0a0a0a;
+    color: #eee;
+    font-family: Arial, sans-serif;
+    text-align: center;
+  }
+  h1 { margin: 20px 0 10px; font-weight: 500; font-size: 22px; }
+  #status { margin: 8px 0; color: #9ae6b4; font-size: 14px; }
+  #video-container {
+    position: relative;
+    display: inline-block;
+    width: 100%;
+    max-width: 720px;
+    aspect-ratio: 720 / 560;
+    margin-top: 10px;
+  }
+  video, canvas {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    border-radius: 8px;
+  }
+  button {
+    padding: 10px 20px;
+    margin: 6px;
+    border: none;
+    border-radius: 6px;
+    background: #16a34a;
+    color: white;
+    font-size: 15px;
+    cursor: pointer;
+  }
+  button:hover { background: #128038; }
+</style>
+</head>
+<body>
+
+<h1>🟢 Live Detection — Face + Hands + Objects</h1>
+<button id="startBtn">Start Camera</button>
+<div id="status">Status: idle</div>
+
+<div id="video-container">
+  <video id="video" width="720" height="560" autoplay muted playsinline></video>
+  <canvas id="overlay" width="720" height="560"></canvas>
+</div>
+
+<!-- face-api.js -->
+<script src="https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js"></script>
+<!-- TensorFlow.js core + models -->
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.10.0/dist/tf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.2/dist/coco-ssd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/handpose@0.1.0/dist/handpose.min.js"></script>
+
+<script>
+const video = document.getElementById('video');
+const canvas = document.getElementById('overlay');
+const ctx = canvas.getContext('2d');
+const statusEl = document.getElementById('status');
+const startBtn = document.getElementById('startBtn');
+
+let cocoModel = null;
+let handModel = null;
+let running = false;
+
+const MODEL_URL = 'https://cdn.jsdelivr.net/gh/justadudewhohacks/face-api.js@0.22.2/weights';
+const GREEN = '#00ff66';
+
+const fingerJoints = {
+  thumb: [0, 1, 2, 3, 4],
+  indexFinger: [0, 5, 6, 7, 8],
+  middleFinger: [0, 9, 10, 11, 12],
+  ringFinger: [0, 13, 14, 15, 16],
+  pinky: [0, 17, 18, 19, 20]
+};
+
+async function loadModels() {
+  statusEl.textContent = 'Status: loading models (face + hand + object)...';
+  await faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL);
+  await faceapi.nets.faceExpressionNet.loadFromUri(MODEL_URL);
+  await faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL);
+  handModel = await handpose.load();
+  cocoModel = await cocoSsd.load();
+  statusEl.textContent = 'Status: all models loaded';
+}
+
+async function startCamera() {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ video: {} });
+    video.srcObject = stream;
+    statusEl.textContent = 'Status: camera started, loading models...';
+    await loadModels();
+    running = true;
+    statusEl.textContent = 'Status: detecting face, hands & objects';
+    detectLoop();
+  } catch (err) {
+    statusEl.textContent = 'Status: camera access denied or unavailable';
+    console.error(err);
+  }
+}
+
+function drawBox(x, y, w, h, label) {
+  ctx.strokeStyle = GREEN;
+  ctx.lineWidth = 2;
+  ctx.shadowColor = GREEN;
+  ctx.shadowBlur = 6;
+  ctx.strokeRect(x, y, w, h);
+  ctx.shadowBlur = 0;
+  if (label) {
+    ctx.fillStyle = GREEN;
+    ctx.font = '16px Arial';
+    ctx.fillText(label, x, y > 18 ? y - 6 : y + 16);
+  }
+}
+
+function drawLine(x1, y1, x2, y2) {
+  ctx.strokeStyle = GREEN;
+  ctx.lineWidth = 2;
+  ctx.shadowColor = GREEN;
+  ctx.shadowBlur = 6;
+  ctx.beginPath();
+  ctx.moveTo(x1, y1);
+  ctx.lineTo(x2, y2);
+  ctx.stroke();
+  ctx.shadowBlur = 0;
+}
+
+function drawDot(x, y) {
+  ctx.fillStyle = GREEN;
+  ctx.beginPath();
+  ctx.arc(x, y, 3, 0, 2 * Math.PI);
+  ctx.fill();
+}
+
+async function detectLoop() {
+  if (!running) return;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  const faceResults = await faceapi
+    .detectAllFaces(video, new faceapi.TinyFaceDetectorOptions())
+    .withFaceLandmarks()
+    .withFaceExpressions();
+
+  faceResults.forEach(det => {
+    const box = det.detection.box;
+    const topExpr = Object.entries(det.expressions).sort((a, b) => b[1] - a[1])[0];
+    drawBox(box.x, box.y, box.width, box.height, `${topExpr[0]} (${Math.round(topExpr[1] * 100)}%)`);
+    det.landmarks.positions.forEach(pt => drawDot(pt.x, pt.y));
+  });
+
+  const handResults = await handModel.estimateHands(video);
+  handResults.forEach(hand => {
+    const kp = hand.landmarks;
+    Object.values(fingerJoints).forEach(finger => {
+      for (let i = 0; i < finger.length - 1; i++) {
+        const [x1, y1] = kp[finger[i]];
+        const [x2, y2] = kp[finger[i + 1]];
+        drawLine(x1, y1, x2, y2);
+      }
+    });
+    kp.forEach(([x, y]) => drawDot(x, y));
+  });
+
+  const objectResults = await cocoModel.detect(video);
+  objectResults.forEach(pred => {
+    const [x, y, w, h] = pred.bbox;
+    drawBox(x, y, w, h, `${pred.class} (${Math.round(pred.score * 100)}%)`);
+  });
+
+  requestAnimationFrame(detectLoop);
+}
+
+startBtn.addEventListener('click', startCamera);
+</script>
+
+</body>
+</html>
